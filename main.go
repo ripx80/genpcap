@@ -22,6 +22,7 @@ type Endpoint struct {
 	Mac      net.HardwareAddr
 	Port     uint32
 	Seq      uint32
+	Ack      uint32
 	Protocol uint8
 
 	//layers
@@ -73,7 +74,6 @@ type Reader struct {
 	Reciever  *Endpoint
 	PacketBuf []pack
 	first     bool
-	lastAck   uint32
 }
 
 func Pack(options gopacket.SerializeOptions, layer ...gopacket.SerializableLayer) ([]byte, gopacket.CaptureInfo, error) {
@@ -184,6 +184,7 @@ func (r *Reader) Handshake() {
 	r.Sender.tcpLayer.Seq = r.Sender.Seq
 	r.Sender.tcpLayer.Ack = r.Reciever.Seq + 1
 	r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack())
+	r.Reciever.Ack = r.Sender.Seq
 
 }
 
@@ -192,29 +193,30 @@ func (r *Reader) TCPEnd() {
 	r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
 	r.Sender.tcpLayer.ACK = true
 	r.Sender.tcpLayer.FIN = true
-	r.Sender.tcpLayer.Seq = r.lastAck
+	r.Sender.tcpLayer.Seq = r.Reciever.Ack
 	r.Sender.tcpLayer.Ack = r.Sender.Seq
 	r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack())
-	r.lastAck++
+	r.Reciever.Ack++
 
 	// FIN,ACK
 	r.Reciever.tcpLayer = r.Reciever.TCP(r.Sender)
 	r.Reciever.tcpLayer.ACK = true
 	r.Reciever.tcpLayer.FIN = true
 	r.Reciever.tcpLayer.Seq = r.Sender.Seq
-	r.Reciever.tcpLayer.Ack = r.lastAck
+	r.Reciever.tcpLayer.Ack = r.Reciever.Ack
 	r.PacketBuf = append(r.PacketBuf, r.Reciever.genTCPPack())
 	r.Sender.Seq++
 
 	//ACK
 	r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
 	r.Sender.tcpLayer.ACK = true
-	r.Sender.tcpLayer.Seq = r.lastAck
+	r.Sender.tcpLayer.Seq = r.Reciever.Ack
 	r.Sender.tcpLayer.Ack = r.Sender.Seq
 	r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack())
-	r.Reciever.Seq++
+	// not needed
+	//r.Reciever.Seq++
+	//r.Sender.Seq = r.Reciever.Seq
 
-	r.Sender.Seq = r.Reciever.Seq
 }
 
 func (r *Reader) ReadPacketData() ([]byte, gopacket.CaptureInfo, error) {
@@ -230,11 +232,6 @@ func (r *Reader) ReadPacketData() ([]byte, gopacket.CaptureInfo, error) {
 	if err != nil {
 		return nil, gopacket.CaptureInfo{}, err
 	}
-	send := pack{}
-
-	if r.lastAck == 0 {
-		r.lastAck = r.Sender.Seq
-	}
 
 	//generate Sender Pack
 	r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
@@ -243,25 +240,22 @@ func (r *Reader) ReadPacketData() ([]byte, gopacket.CaptureInfo, error) {
 		r.Sender.tcpLayer.PSH = true
 	}
 	r.Sender.tcpLayer.ACK = true
-	r.Sender.tcpLayer.Seq = r.lastAck
+	r.Sender.tcpLayer.Seq = r.Reciever.Ack
 	r.Sender.tcpLayer.Ack = r.Sender.Seq
-	send = r.Sender.genTCPPack(r.buf[:r.num])
+	send := r.Sender.genTCPPack(r.buf[:r.num])
 
 	//ACK
 	r.Reciever.tcpLayer = r.Reciever.TCP(r.Sender)
 	r.Reciever.tcpLayer.ACK = true
 	r.Reciever.tcpLayer.Seq = r.Sender.Seq
-	r.Reciever.tcpLayer.Ack = r.lastAck + uint32(r.num)
+	r.Reciever.tcpLayer.Ack = r.Reciever.Ack + uint32(r.num)
 	r.PacketBuf = append(r.PacketBuf, r.Reciever.genTCPPack())
-	r.lastAck = r.lastAck + uint32(r.num)
+	r.Reciever.Ack = r.Reciever.Ack + uint32(r.num)
 
 	if r.num < 1024 {
-		//tcp fin to packet buffer
 		r.TCPEnd()
 	}
 
-	//}
-	//transLayer = tcp
 	//var transLayer gopacket.SerializableLayer
 
 	// if r.Protocol == 1 {
@@ -269,10 +263,6 @@ func (r *Reader) ReadPacketData() ([]byte, gopacket.CaptureInfo, error) {
 	// 	udp := r.UDP()
 	// 	ipLayer.Protocol = layers.IPProtocolUDP
 	// 	udp.SetNetworkLayerForChecksum(ipLayer)
-	// 	transLayer = udp
-	// } else {
-	//tcp
-
 	//}
 
 	return send.data, send.ci, send.err
@@ -285,7 +275,7 @@ func main() {
 	a.Author("Ripx80")
 	inputFile := a.Arg("input", "file to convert to pcap").Required().File()
 	outputFile := a.Arg("output", "filename of output pcap").Required().String()
-	tcp := a.Flag("tcp", "use tcp as transport protocol. out-of-order warning").Bool()
+	//tcp := a.Flag("tcp", "use tcp as transport protocol. out-of-order warning").Bool()
 
 	_, err := a.Parse(os.Args[1:])
 	if err != nil {
@@ -314,13 +304,9 @@ func main() {
 		log.Fatal("canot use io Reader")
 	}
 
-	//generate Handshake in PacketBuf
+	//generate Handshake in PacketBuf init from Sender -->
 	handle.Handshake()
 
-	if *tcp {
-		fmt.Println("tcp")
-		//handle.Protocol = 2
-	}
 	for {
 		data, ci, err := handle.ReadPacketData()
 		switch {
