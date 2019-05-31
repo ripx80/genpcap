@@ -17,22 +17,20 @@ import (
 	"time"
 )
 
-var (
-	device      string        = "lo0"
-	snapshotLen uint32        = 1024
-	promiscuous bool          = false
-	timeout     time.Duration = 30 * time.Second
-)
-
 type Endpoint struct {
 	IP       net.IP
 	Mac      net.HardwareAddr
 	Port     uint32
 	Seq      uint32
-	Ack      uint32
 	Protocol uint8
-	Options  gopacket.SerializeOptions
-	Received uint32
+
+	//layers
+	ethLayer *layers.Ethernet
+	ipLayer  *layers.IPv4
+	tcpLayer *layers.TCP
+
+	WindowSize uint16
+	Options    gopacket.SerializeOptions
 }
 
 type pack struct {
@@ -47,22 +45,22 @@ var (
 		ComputeChecksums: true,
 	}
 	DefaultSender = &Endpoint{
-		IP:       net.IP{127, 0, 0, 1},
-		Mac:      net.HardwareAddr{0xFF, 0xAA, 0xFA, 0xAA, 0xFF, 0xAA},
-		Port:     4432,
-		Protocol: 2,
-		Seq:      uint32(rand.Intn(100)),
-		Ack:      0,
-		Options:  DefaultOptions,
+		IP:         net.IP{127, 0, 0, 1},
+		Mac:        net.HardwareAddr{0xFF, 0xAA, 0xFA, 0xAA, 0xFF, 0xAA},
+		Port:       4432,
+		Protocol:   2,
+		Seq:        uint32(rand.Intn(1000)),
+		Options:    DefaultOptions,
+		WindowSize: 0xaaa,
 	}
 	DefaultReciever = &Endpoint{
-		IP:       net.IP{8, 8, 8, 8},
-		Mac:      net.HardwareAddr{0xBD, 0xBD, 0xBD, 0xBD, 0xBD, 0xBD},
-		Port:     80,
-		Protocol: 2,
-		Seq:      uint32(rand.Intn(100)),
-		Ack:      0,
-		Options:  DefaultOptions,
+		IP:         net.IP{8, 8, 8, 8},
+		Mac:        net.HardwareAddr{0xBD, 0xBD, 0xBD, 0xBD, 0xBD, 0xBD},
+		Port:       80,
+		Protocol:   2,
+		Seq:        uint32(rand.Intn(1000)),
+		Options:    DefaultOptions,
+		WindowSize: 0xaaa,
 	}
 )
 
@@ -75,6 +73,29 @@ type Reader struct {
 	Reciever  *Endpoint
 	PacketBuf []pack
 	first     bool
+	lastAck   uint32
+}
+
+func Pack(options gopacket.SerializeOptions, layer ...gopacket.SerializableLayer) ([]byte, gopacket.CaptureInfo, error) {
+	ci := gopacket.CaptureInfo{}
+	buffer := gopacket.NewSerializeBuffer()
+	if err := gopacket.SerializeLayers(buffer, options,
+		layer...,
+	); err != nil {
+		return nil, ci, err
+	}
+	out := buffer.Bytes()
+	ci.Timestamp = time.Now()
+	ci.Length = len(out)
+	ci.CaptureLength = len(out)
+
+	return out, ci, nil
+}
+
+func (src *Endpoint) init(dst *Endpoint) {
+	src.ethLayer = src.EthernetIPv4(dst)
+	src.ipLayer = src.IPv4(dst)
+	src.tcpLayer = src.TCP(dst)
 }
 
 func (src *Endpoint) EthernetIPv4(dst *Endpoint) *layers.Ethernet {
@@ -101,141 +122,99 @@ func (src *Endpoint) UDP(dst *Endpoint) *layers.UDP {
 	}
 }
 
-/*
-1. Random Seq
-2. Payload+seq
-*/
 func (src *Endpoint) TCP(dst *Endpoint) *layers.TCP {
 	return &layers.TCP{
 		SrcPort: layers.TCPPort(src.Port),
 		DstPort: layers.TCPPort(dst.Port),
 		Seq:     src.Seq,
-		Window:  0xaaaa, // change this
+		Window:  src.WindowSize,
 	}
+}
+
+func (src *Endpoint) genTCPPack(payload ...[]byte) pack {
+	//generate fresh tcp layer
+	src.tcpLayer.SetNetworkLayerForChecksum(src.ipLayer)
+	src.ipLayer.Protocol = layers.IPProtocolTCP
+
+	if len(payload) > 0 {
+		d, c, e := Pack(src.Options, src.ethLayer,
+			src.ipLayer,
+			src.tcpLayer,
+			gopacket.Payload(payload[0]),
+		)
+
+		return pack{d, c, e}
+	}
+	d, c, e := Pack(src.Options, src.ethLayer,
+		src.ipLayer,
+		src.tcpLayer,
+	)
+	return pack{d, c, e}
 }
 
 func NewReader(r io.Reader) (*Reader, error) {
 	ret := Reader{r: r, buf: make([]byte, 1024), junksize: 1024, Sender: DefaultSender, Reciever: DefaultReciever, first: true}
+	ret.Sender.init(ret.Reciever)
+	ret.Reciever.init(ret.Sender)
 	return &ret, nil
 }
 
-func (r *Reader) Pack(options gopacket.SerializeOptions, layer ...gopacket.SerializableLayer) ([]byte, gopacket.CaptureInfo, error) {
-	ci := gopacket.CaptureInfo{}
-	buffer := gopacket.NewSerializeBuffer()
-	if err := gopacket.SerializeLayers(buffer, options,
-		layer...,
-	); err != nil {
-		return nil, ci, err
-	}
-	out := buffer.Bytes()
-	ci.Timestamp = time.Now()
-	ci.Length = len(out)
-	ci.CaptureLength = len(out)
-
-	return out, ci, nil
-}
-
-// func (src *Endpoint) AckPack(dst *Endpoint) ([]byte, gopacket.CaptureInfo, error) {
-// 	ethLayer := &layers.Ethernet{
-// 		SrcMAC:       src.Mac,
-// 		DstMAC:       dst.Mac,
-// 		EthernetType: layers.EthernetTypeIPv4,
-// 	}
-// 	ipLayer := &layers.IPv4{
-// 		SrcIP:   r.Endpoint.DstIP,
-// 		DstIP:   r.Endpoint.SrcIP,
-// 		Version: 4,
-// 		TTL:     64,
-// 	}
-// 	r.Endpoint.DstSeq++
-// 	tcp := &layers.TCP{
-// 		SrcPort: layers.TCPPort(r.Endpoint.DstPort),
-// 		DstPort: layers.TCPPort(r.Endpoint.SrcPort),
-// 		Window:  0xaaaa,
-// 		SYN:     false,
-// 		Seq:     r.Endpoint.DstSeq,
-// 		Ack:     r.Endpoint.SrcSeq + 1,
-// 	}
-
-// 	ipLayer.Protocol = layers.IPProtocolTCP
-// 	tcp.SetNetworkLayerForChecksum(ipLayer)
-// 	return r.Pack(
-// 		ethLayer,
-// 		ipLayer,
-// 		tcp,
-// 	)
-// }
-
-// func (r *Reader) Handshake() (packets [3]pack) {
-
-// 	ethLayer := r.EthernetIPv4()
-// 	ipLayer := r.IPv4()
-// 	tcp := r.TCP()
-// 	tcp.SYN = true
-// 	ipLayer.Protocol = layers.IPProtocolTCP
-// 	tcp.SetNetworkLayerForChecksum(ipLayer)
-// 	data, ci, err := r.Pack(ethLayer, ipLayer, tcp)
-// 	packets[0] = pack{data, ci, err}
-// 	fmt.Printf("1. SYN -> Seq(%d)", r.Endpoint.SrcSeq)
-
-// 	return packets
-// }
-
 func (r *Reader) Handshake() {
 
-	fmt.Printf("1. Sender --SYN, SEQ: %d ---> Reciever\n", r.Sender.Seq)
 	//generate SYN
-	ethLayer := r.Sender.EthernetIPv4(r.Reciever)
-	ipLayer := r.Sender.IPv4(r.Reciever)
-	tcp := r.Sender.TCP(r.Reciever)
-	tcp.SYN = true
-	tcp.Window = 0
-	tcp.Seq = r.Sender.Seq
-	tcp.SetNetworkLayerForChecksum(ipLayer)
-	ipLayer.Protocol = layers.IPProtocolTCP
-	d, c, e := r.Pack(r.Sender.Options, ethLayer,
-		ipLayer,
-		tcp,
-		gopacket.Payload(r.buf[:r.num]))
-	r.PacketBuf = append(r.PacketBuf, pack{d, c, e})
-
-	r.Sender.Seq++
+	r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
+	r.Sender.tcpLayer.SYN = true
+	r.Sender.tcpLayer.Window = 0 //this should be null
+	r.Sender.tcpLayer.Seq = r.Sender.Seq
+	r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack())
 
 	// generate Ack,SYN Pack
-	fmt.Printf("2. Sender <-- SYN,ACK ( SEQ:%d, ACK=%d)\n", r.Reciever.Seq, r.Sender.Seq) //+1
-	ethLayer = r.Reciever.EthernetIPv4(r.Sender)
-	ipLayer = r.Reciever.IPv4(r.Sender)
-	tcp = r.Reciever.TCP(r.Sender)
-	tcp.SYN = true
-	tcp.ACK = true
-	tcp.Seq = r.Reciever.Seq
-	tcp.Window = 0
-	tcp.Ack = r.Sender.Seq
-	tcp.SetNetworkLayerForChecksum(ipLayer)
-	ipLayer.Protocol = layers.IPProtocolTCP
-	d, c, e = r.Pack(r.Reciever.Options, ethLayer,
-		ipLayer,
-		tcp,
-	)
-	r.PacketBuf = append(r.PacketBuf, pack{d, c, e})
+	r.Reciever.tcpLayer = r.Sender.TCP(r.Sender)
+	r.Reciever.tcpLayer.SYN = true
+	r.Reciever.tcpLayer.ACK = true
+	r.Reciever.tcpLayer.Seq = r.Reciever.Seq
+	r.Reciever.tcpLayer.Window = 0
+	r.Reciever.tcpLayer.Ack = r.Sender.Seq + 1
+	r.PacketBuf = append(r.PacketBuf, r.Reciever.genTCPPack())
+	r.Sender.Seq++
+
+	// generate ACK
+	r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
+	r.Sender.tcpLayer.ACK = true
+	r.Sender.tcpLayer.Seq = r.Sender.Seq
+	r.Sender.tcpLayer.Ack = r.Reciever.Seq + 1
+	r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack())
+
+}
+
+func (r *Reader) TCPEnd() {
+	//sender FIN,ACK
+	r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
+	r.Sender.tcpLayer.ACK = true
+	r.Sender.tcpLayer.FIN = true
+	r.Sender.tcpLayer.Seq = r.lastAck
+	r.Sender.tcpLayer.Ack = r.Sender.Seq
+	r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack())
+	r.lastAck++
+
+	// FIN,ACK
+	r.Reciever.tcpLayer = r.Reciever.TCP(r.Sender)
+	r.Reciever.tcpLayer.ACK = true
+	r.Reciever.tcpLayer.FIN = true
+	r.Reciever.tcpLayer.Seq = r.Sender.Seq
+	r.Reciever.tcpLayer.Ack = r.lastAck
+	r.PacketBuf = append(r.PacketBuf, r.Reciever.genTCPPack())
+	r.Sender.Seq++
+
+	//ACK
+	r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
+	r.Sender.tcpLayer.ACK = true
+	r.Sender.tcpLayer.Seq = r.lastAck
+	r.Sender.tcpLayer.Ack = r.Sender.Seq
+	r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack())
 	r.Reciever.Seq++
 
-	fmt.Printf("1. Sender --ACK, SEQ=%d ACK=%d  ---> Reciever\n", r.Sender.Seq, r.Reciever.Seq) //+1
-	// generate ACK
-	ethLayer = r.Sender.EthernetIPv4(r.Reciever)
-	ipLayer = r.Sender.IPv4(r.Reciever)
-	tcp = r.Sender.TCP(r.Reciever)
-	tcp.ACK = true
-	tcp.Seq = r.Sender.Seq
-	tcp.Ack = r.Reciever.Seq
-	tcp.SetNetworkLayerForChecksum(ipLayer)
-	ipLayer.Protocol = layers.IPProtocolTCP
-	d, c, e = r.Pack(r.Sender.Options, ethLayer,
-		ipLayer,
-		tcp,
-	)
-	r.PacketBuf = append(r.PacketBuf, pack{d, c, e})
-
+	r.Sender.Seq = r.Reciever.Seq
 }
 
 func (r *Reader) ReadPacketData() ([]byte, gopacket.CaptureInfo, error) {
@@ -251,92 +230,37 @@ func (r *Reader) ReadPacketData() ([]byte, gopacket.CaptureInfo, error) {
 	if err != nil {
 		return nil, gopacket.CaptureInfo{}, err
 	}
-	send := &pack{}
+	send := pack{}
 
-	// The acknowledgement number is the sequence number of the next byte the receiver expects to receive.
+	if r.lastAck == 0 {
+		r.lastAck = r.Sender.Seq
+	}
+
+	//generate Sender Pack
+	r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
 	if r.first {
 		r.first = false
-
-		//generate Sender Pack
-		//-------------------------------//
-		ethLayer := r.Sender.EthernetIPv4(r.Reciever)
-		ipLayer := r.Sender.IPv4(r.Reciever)
-		tcp := r.Sender.TCP(r.Reciever)
-		tcp.ACK = true
-		tcp.PSH = true
-		tcp.Seq = r.Sender.Seq //after first packet send,ack here ACK from r.Receiver (len+1)
-		tcp.Ack = r.Reciever.Seq
-
-		tcp.SetNetworkLayerForChecksum(ipLayer)
-		ipLayer.Protocol = layers.IPProtocolTCP
-
-		d, c, e := r.Pack(r.Sender.Options, ethLayer,
-			ipLayer,
-			tcp,
-			gopacket.Payload(r.buf[:r.num]))
-		send = &pack{d, c, e}
-		r.Sender.Seq = r.Sender.Seq + uint32(r.num)
-		//-------------------------------//
-
-		//r.Sender.Seq++
-
-		// generate Ack Pack
-		//-------------------------------//
-		ethLayer = r.Reciever.EthernetIPv4(r.Sender)
-		ipLayer = r.Reciever.IPv4(r.Sender)
-		tcp = r.Reciever.TCP(r.Sender)
-		tcp.ACK = true
-		//tcp.Seq = r.Sender.Seq
-		tcp.Ack = r.Sender.Seq //Seq+PayloadLen
-		tcp.SetNetworkLayerForChecksum(ipLayer)
-		ipLayer.Protocol = layers.IPProtocolTCP
-		d, c, e = r.Pack(r.Reciever.Options, ethLayer,
-			ipLayer,
-			tcp,
-		)
-		recieve := pack{d, c, e}
-		r.PacketBuf = append(r.PacketBuf, recieve)
-		r.Reciever.Seq++
-		//-------------------------------//
-	} else {
-
-		//generate Sender Pack
-		ethLayer := r.Sender.EthernetIPv4(r.Reciever)
-		ipLayer := r.Sender.IPv4(r.Reciever)
-		tcp := r.Sender.TCP(r.Reciever)
-		tcp.ACK = true
-		tcp.PSH = false
-		tcp.Seq = r.Sender.Seq //after first packet send,ack here ACK from r.Receiver (len+1)
-		tcp.Ack = r.Reciever.Seq + uint32(r.num)
-
-		tcp.SetNetworkLayerForChecksum(ipLayer)
-		ipLayer.Protocol = layers.IPProtocolTCP
-
-		d, c, e := r.Pack(r.Sender.Options, ethLayer,
-			ipLayer,
-			tcp,
-			gopacket.Payload(r.buf[:r.num]))
-		send = &pack{d, c, e}
-
-		//r.Sender.Seq++
-
-		// generate Ack Pack
-		ethLayer = r.Reciever.EthernetIPv4(r.Sender)
-		ipLayer = r.Reciever.IPv4(r.Sender)
-		tcp = r.Reciever.TCP(r.Sender)
-		tcp.ACK = true
-		tcp.Seq = r.Reciever.Seq
-		tcp.Ack = r.Sender.Seq + uint32(r.num) //Seq+PayloadLen
-		tcp.SetNetworkLayerForChecksum(ipLayer)
-		ipLayer.Protocol = layers.IPProtocolTCP
-		d, c, e = r.Pack(r.Reciever.Options, ethLayer,
-			ipLayer,
-			tcp,
-		)
-		recieve := pack{d, c, e}
-		r.PacketBuf = append(r.PacketBuf, recieve)
-		r.Reciever.Seq++
+		r.Sender.tcpLayer.PSH = true
 	}
+	r.Sender.tcpLayer.ACK = true
+	r.Sender.tcpLayer.Seq = r.lastAck
+	r.Sender.tcpLayer.Ack = r.Sender.Seq
+	send = r.Sender.genTCPPack(r.buf[:r.num])
+
+	//ACK
+	r.Reciever.tcpLayer = r.Reciever.TCP(r.Sender)
+	r.Reciever.tcpLayer.ACK = true
+	r.Reciever.tcpLayer.Seq = r.Sender.Seq
+	r.Reciever.tcpLayer.Ack = r.lastAck + uint32(r.num)
+	r.PacketBuf = append(r.PacketBuf, r.Reciever.genTCPPack())
+	r.lastAck = r.lastAck + uint32(r.num)
+
+	if r.num < 1024 {
+		//tcp fin to packet buffer
+		r.TCPEnd()
+	}
+
+	//}
 	//transLayer = tcp
 	//var transLayer gopacket.SerializableLayer
 
@@ -350,6 +274,7 @@ func (r *Reader) ReadPacketData() ([]byte, gopacket.CaptureInfo, error) {
 	//tcp
 
 	//}
+
 	return send.data, send.ci, send.err
 }
 
@@ -369,18 +294,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// ifhandle, err := pcap.OpenLive(device, int32(snapshotLen), promiscuous, timeout)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
-	// defer ifhandle.Close()
-
 	f, err := os.Create(*outputFile)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	var junksize uint32 = 1024
 	pcapWriter := pcapgo.NewWriter(f)
-	pcapWriter.WriteFileHeader(snapshotLen, layers.LinkTypeEthernet)
+	pcapWriter.WriteFileHeader(junksize, layers.LinkTypeEthernet)
 	defer f.Close()
 
 	// if you will use a buffer of bytes
@@ -400,11 +321,7 @@ func main() {
 		fmt.Println("tcp")
 		//handle.Protocol = 2
 	}
-	cnt := 0
 	for {
-		if cnt == 8 {
-			break
-		}
 		data, ci, err := handle.ReadPacketData()
 		switch {
 		case err == io.EOF:
@@ -413,14 +330,12 @@ func main() {
 		case err != nil:
 			log.Printf("Failed to read packet: %s\n", err)
 		default:
-			//ifhandle.WritePacketData(data)
 			err := pcapWriter.WritePacket(ci, data)
 			if err != nil {
 				fmt.Print(err)
 				return
 			}
 		}
-		cnt++
 	}
 
 }
