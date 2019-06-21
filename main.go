@@ -27,11 +27,12 @@ import (
 )
 
 type Endpoint struct {
-	IP       net.IP
-	Mac      net.HardwareAddr
-	Port     uint32
-	Seq      uint32
-	Ack      uint32
+	IP   net.IP
+	Mac  net.HardwareAddr
+	Port uint32
+	Seq  uint32
+	//StartSeq uint32
+
 	Protocol uint8
 
 	//layers
@@ -60,6 +61,7 @@ type Reader struct {
 	PacketBuf []pack
 	first     bool
 	Http      bool
+	Len       int64
 	//	TotalSize int64
 }
 
@@ -139,7 +141,7 @@ func (src *Endpoint) genTCPPack(payload ...[]byte) pack {
 	return pack{d, c, e}
 }
 
-func NewReader(r io.Reader) (*Reader, error) {
+func NewReader(r io.Reader, l int64) (*Reader, error) {
 	var (
 		DefaultOptions = gopacket.SerializeOptions{
 			FixLengths:       true,
@@ -164,72 +166,11 @@ func NewReader(r io.Reader) (*Reader, error) {
 			WindowSize: 0xaaa,
 		}
 	)
-	ret := Reader{r: r, buf: make([]byte, 1024), junksize: 1024, Sender: DefaultSender, Reciever: DefaultReciever, first: true}
+	ret := Reader{r: r, buf: make([]byte, 1024), junksize: 1024, Sender: DefaultSender, Reciever: DefaultReciever, first: true, Len: l}
 	ret.Sender.init(ret.Reciever)
 	ret.Reciever.init(ret.Sender)
 
-	//fi, _ := (*Reader).Stat()
-	//fmt.Printf("File Size: %d\n", fi.Size())
-
 	return &ret, nil
-}
-
-func (r *Reader) HttpOK() {
-
-	const resp = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n"
-	b := fmt.Sprintf(resp, 3899)
-	fmt.Printf("%s\n", b)
-	r.Reciever.tcpLayer = r.Reciever.TCP(r.Sender)
-	r.Reciever.tcpLayer.PSH = true
-	r.Reciever.tcpLayer.ACK = true
-	r.Reciever.tcpLayer.Seq = r.Reciever.Ack
-	r.Reciever.tcpLayer.Ack = r.Sender.Seq
-	r.PacketBuf = append(r.PacketBuf, r.Reciever.genTCPPack([]byte(b)))
-
-	//ACK
-	r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
-	r.Sender.tcpLayer.ACK = true
-	r.Sender.tcpLayer.Seq = r.Sender.Seq
-	r.Sender.tcpLayer.Ack = r.Reciever.Ack + uint32(len(b))
-	r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack())
-
-	//r.Reciever.Ack = r.Reciever.Ack + uint32(len(b))
-
-	//r.Sender.Seq++
-}
-
-func (r *Reader) HttpGet() {
-	// generate http get request from sender,(*inputFile).Name()
-
-	const request = "GET /%s HTTP/1.1\r\nUser-Agent: Mozilla/4.0\r\nHost: %s\r\n\r\n"
-	b := fmt.Sprintf(request, "fn", "8.8.8.8")
-	fmt.Println(b)
-
-	r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
-	r.Sender.tcpLayer.PSH = true
-	r.Sender.tcpLayer.ACK = true
-	r.Sender.tcpLayer.Seq = r.Sender.Seq
-	r.Sender.tcpLayer.Ack = r.Reciever.Seq
-	r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack([]byte(b)))
-
-	//r.Sender.Seq++
-	//ACK
-	r.Reciever.tcpLayer = r.Reciever.TCP(r.Sender)
-	r.Reciever.tcpLayer.ACK = true
-	r.Reciever.tcpLayer.Seq = r.Reciever.Seq
-	r.Reciever.tcpLayer.Ack = r.Sender.Seq + uint32(len(b)) //+ 1 //uint32(len(b))
-	r.PacketBuf = append(r.PacketBuf, r.Reciever.genTCPPack())
-
-	//r.Reciever.Ack = r.Reciever.Ack + uint32(len(b)) + 1
-
-	//r.Reciever.Ack = r.Reciever.Ack + uint32(len(b))
-
-	//r.Reciever.Ack++
-	//r.Reciever.Ack = r.Sender.Seq
-
-	//r.HttpOK()
-
-	//r.Reciever.Ack++
 }
 
 func (r *Reader) Handshake() {
@@ -258,9 +199,31 @@ func (r *Reader) Handshake() {
 	r.Sender.tcpLayer.Seq = r.Sender.Seq
 	r.Sender.tcpLayer.Ack = r.Reciever.Seq
 	r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack())
+}
 
-	//r.Reciever.Ack = r.Sender.Seq
+func (r *Reader) HttpGet() {
+	// generate http get request from sender,(*inputFile).Name()
 
+	const request = "GET /%s HTTP/1.1\r\nUser-Agent: Mozilla/4.0\r\nHost: %s\r\n\r\n"
+	b := fmt.Sprintf(request, "fn", "8.8.8.8")
+	fmt.Println(b)
+
+	r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
+	r.Sender.tcpLayer.PSH = true
+	r.Sender.tcpLayer.ACK = true
+	r.Sender.tcpLayer.Seq = r.Sender.Seq
+	r.Sender.tcpLayer.Ack = r.Reciever.Seq
+	r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack([]byte(b)))
+
+	//increase Seq by sended bytes from sender
+	r.Sender.Seq += uint32(len(b))
+
+	//ACK
+	r.Reciever.tcpLayer = r.Reciever.TCP(r.Sender)
+	r.Reciever.tcpLayer.ACK = true
+	r.Reciever.tcpLayer.Seq = r.Reciever.Seq
+	r.Reciever.tcpLayer.Ack = r.Sender.Seq
+	r.PacketBuf = append(r.PacketBuf, r.Reciever.genTCPPack())
 }
 
 func (r *Reader) TCPEnd() {
@@ -268,25 +231,26 @@ func (r *Reader) TCPEnd() {
 	r.Reciever.tcpLayer = r.Reciever.TCP(r.Sender)
 	r.Reciever.tcpLayer.ACK = true
 	r.Reciever.tcpLayer.FIN = true
-	r.Reciever.tcpLayer.Seq = r.Reciever.Ack
+	r.Reciever.tcpLayer.Seq = r.Reciever.Seq
 	r.Reciever.tcpLayer.Ack = r.Sender.Seq
 	r.PacketBuf = append(r.PacketBuf, r.Reciever.genTCPPack())
 
 	// FIN,ACK
+	r.Reciever.Seq++
 	r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
 	r.Sender.tcpLayer.ACK = true
 	r.Sender.tcpLayer.FIN = true
 	r.Sender.tcpLayer.Seq = r.Sender.Seq
-	r.Sender.tcpLayer.Ack = r.Reciever.Ack + 1
+	r.Sender.tcpLayer.Ack = r.Reciever.Seq
 	r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack())
-	//r.Reciever.Ack++
-	//r.Sender.Seq++
+	//
+	r.Sender.Seq++
 
 	//ACK
 	r.Reciever.tcpLayer = r.Reciever.TCP(r.Sender)
 	r.Reciever.tcpLayer.ACK = true
-	r.Reciever.tcpLayer.Seq = r.Reciever.Ack + 1
-	r.Reciever.tcpLayer.Ack = r.Sender.Seq + 1
+	r.Reciever.tcpLayer.Seq = r.Reciever.Seq
+	r.Reciever.tcpLayer.Ack = r.Sender.Seq
 	r.PacketBuf = append(r.PacketBuf, r.Reciever.genTCPPack())
 }
 
@@ -300,7 +264,8 @@ func (r *Reader) ReadPacketData() ([]byte, gopacket.CaptureInfo, error) {
 	}
 
 	r.num, err = io.ReadAtLeast(r.r, r.buf, 1)
-	r.total = r.total + r.num
+	fmt.Println(r.num)
+	//r.total = r.total + r.num
 	if err != nil {
 		return nil, gopacket.CaptureInfo{}, err
 	}
@@ -310,44 +275,40 @@ func (r *Reader) ReadPacketData() ([]byte, gopacket.CaptureInfo, error) {
 
 	if r.first {
 		r.first = false
-
+		// HTTP OK with Body
 		r.Reciever.tcpLayer = r.Reciever.TCP(r.Sender)
 		r.Reciever.tcpLayer.ACK = true
 		r.Reciever.tcpLayer.Ack = r.Sender.Seq
 		r.Reciever.tcpLayer.Seq = r.Reciever.Seq
-
 		r.Reciever.tcpLayer.PSH = true
-		//the response must contain the data in body
-		a := append([]byte("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: image/jpeg\r\n\r\n"), r.buf[:r.num]...)
+		a := append([]byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nAccept-Ranges: bytes\r\nContent-Length: %d\r\nConnection: close\r\nContent-Type: image/jpeg\r\n\r\n", r.Len)), r.buf[:r.num]...) //get content type
 		send = r.Reciever.genTCPPack(a)
-		//r.Reciever.Seq++
+		r.Reciever.Seq += uint32(len(a))
 
 		//ACK
 		r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
 		r.Sender.tcpLayer.ACK = true
 		r.Sender.tcpLayer.Seq = r.Sender.Seq
-		r.Sender.tcpLayer.Ack = r.Reciever.Seq + uint32(len(a))
+		r.Sender.tcpLayer.Ack = r.Reciever.Seq
 		r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack())
 
-		r.Reciever.Ack = r.Reciever.Seq + uint32(len(a))
-
 	} else {
+
 		r.Reciever.tcpLayer = r.Reciever.TCP(r.Sender)
 		r.Reciever.tcpLayer.ACK = true
-		r.Reciever.tcpLayer.Seq = r.Reciever.Ack
+		r.Reciever.tcpLayer.Seq = r.Reciever.Seq
 		r.Reciever.tcpLayer.Ack = r.Sender.Seq
+		r.Reciever.Seq += uint32(r.num)
 		send = r.Reciever.genTCPPack(r.buf[:r.num])
 
 		//ACK
 		r.Sender.tcpLayer = r.Sender.TCP(r.Reciever)
 		r.Sender.tcpLayer.ACK = true
 		r.Sender.tcpLayer.Seq = r.Sender.Seq
-		r.Sender.tcpLayer.Ack = r.Reciever.Ack + uint32(r.num)
+		r.Sender.tcpLayer.Ack = r.Reciever.Seq
 		r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack())
-		r.Reciever.Ack = r.Reciever.Ack + uint32(r.num)
 	}
 	if r.num < 1024 {
-		//r.HttpOK()
 		r.TCPEnd()
 	}
 
@@ -395,7 +356,11 @@ func main() {
 	// handle, err := NewReader(bytes.NewReader(rawBytes))
 	// fmt.Println(*inputFile)
 
-	handle, err := NewReader(*inputFile)
+	fi, _ := (*inputFile).Stat()
+	fiz := fi.Size()
+	fmt.Printf("File Size: %d\n", fi.Size())
+
+	handle, err := NewReader(*inputFile, fiz)
 	if err != nil {
 		log.Fatal("canot use io Reader")
 	}
