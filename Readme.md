@@ -1,6 +1,6 @@
 # genpacp
 
-Generate a http (GET/RESPONSE) transfered a given file in pcap format. Extracted content with wireshark.
+Generate a http (GET/RESPONSE) transaction with a given file in pcap format. Extracted content with wireshark.
 And yep written in go.
 
 If you use bro you will get a tcp trunced error message. If you know how I can fix this, your are welcome ;-)
@@ -8,10 +8,17 @@ If you use bro you will get a tcp trunced error message. If you know how I can f
 This is a poc to write a pacp injector with a given file or url.
 RFC are welcome!
 
+## Usage
+
+```bash
+# genpcap -h
+genpcap holiday.jpeg holiday.pcap
+```
+
 ## Roadmap
 
 - tests!
 - random seed rand.Seed(42) for seq numbers
 - add udp plain support
 - calculate correct window size
-- http get content type of file
+- http get content type of file. its almost jpeg :-)
