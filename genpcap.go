@@ -1,18 +1,12 @@
-package main
+package genpcap
 
 import (
 	"fmt"
-	"io"
-	"log"
-	"math/rand"
-	"net"
-	"os"
-	"time"
-
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcapgo"
-	kingpin "gopkg.in/alecthomas/kingpin.v2"
+	"io"
+	"net"
+	"time"
 )
 
 /*
@@ -139,7 +133,10 @@ func NewReader(r io.Reader, sender, reciever *Endpoint, junksize uint32) (*Reade
 	return &ret, nil
 }
 
-func (r *Reader) handshake() {
+/*
+Handshake generate a tcp handshake
+*/
+func (r *Reader) Handshake() {
 
 	//generate SYN
 	r.Sender.tcpLayer = r.Sender.tcp(r.Reciever)
@@ -167,7 +164,10 @@ func (r *Reader) handshake() {
 	r.PacketBuf = append(r.PacketBuf, r.Sender.genTCPPack())
 }
 
-func (r *Reader) httpGet() {
+/*
+HTTPGet generate a http get request
+*/
+func (r *Reader) HTTPGet() {
 	const request = "GET /%s HTTP/1.1\r\nUser-Agent: Mozilla/4.0\r\nHost: %s\r\nAccept: */*\r\n\r\n"
 	b := fmt.Sprintf(request, "pp.jpeg", "8.8.8.8:80")
 	r.Sender.tcpLayer = r.Sender.tcp(r.Reciever)
@@ -188,9 +188,9 @@ func (r *Reader) httpGet() {
 }
 
 /*
-httpResponse read the first data content from reader and generate a http response with content included
+HTTPResponse read the first data content from reader and generate a http response with content included
 */
-func (r *Reader) httpResponse(contentLen int64) error {
+func (r *Reader) HTTPResponse(contentLen int64) error {
 
 	num, err := io.ReadAtLeast(r.r, r.buf, 1)
 	if err != nil {
@@ -285,86 +285,4 @@ func (r *Reader) ReadPacketData() ([]byte, gopacket.CaptureInfo, error) {
 		r.tcpEnd()
 	}
 	return send.data, send.ci, send.err
-}
-
-var (
-	defaultOptions = gopacket.SerializeOptions{
-		FixLengths:       true,
-		ComputeChecksums: true,
-	}
-	defaultSender = &Endpoint{
-		IP:         net.IP{127, 0, 0, 1},
-		Mac:        net.HardwareAddr{0xFF, 0xAA, 0xFA, 0xAA, 0xFF, 0xAA},
-		Port:       4432,
-		Seq:        uint32(rand.Intn(1000)),
-		Options:    defaultOptions,
-		WindowSize: 1084,
-	}
-	defaultReciever = &Endpoint{
-		IP:         net.IP{8, 8, 8, 8},
-		Mac:        net.HardwareAddr{0xBD, 0xBD, 0xBD, 0xBD, 0xBD, 0xBD},
-		Port:       80,
-		Seq:        uint32(rand.Intn(1000)),
-		Options:    defaultOptions,
-		WindowSize: 1084,
-	}
-)
-
-func main() {
-	a := kingpin.New("genpcap", "A command-line pcap build application")
-	a.Version("1.0")
-	a.HelpFlag.Short('h')
-	a.Author("Ripx80")
-	junksize := a.Flag("junksize", "split the file content for packages").Short('s').Default("1024").Uint32()
-	inputFile := a.Arg("input", "file to convert to pcap").Required().File()
-	outputFile := a.Arg("output", "filename of output pcap").Required().String()
-
-	_, err := a.Parse(os.Args[1:])
-	if err != nil {
-		log.Println("Error parsing commandline arguments: ", err)
-		a.Usage(os.Args[1:])
-		os.Exit(1)
-	}
-
-	f, err := os.Create(*outputFile)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	pcapWriter := pcapgo.NewWriter(f)
-	pcapWriter.WriteFileHeader(*junksize, layers.LinkTypeEthernet)
-	defer f.Close()
-
-	filesize, _ := (*inputFile).Stat()
-
-	handle, err := NewReader(*inputFile, defaultSender, defaultReciever, *junksize)
-	if err != nil {
-		log.Fatal("io.Reader:", err)
-	}
-
-	handle.handshake()
-	handle.httpGet()
-
-	err = handle.httpResponse(filesize.Size())
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	for {
-		data, ci, err := handle.ReadPacketData()
-		switch {
-		case err == io.EOF:
-			fmt.Println("generation complete")
-			return
-		case err != nil:
-			log.Printf("Failed to read packet: %s\n", err)
-		default:
-			err := pcapWriter.WritePacket(ci, data)
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
-		}
-	}
 }
